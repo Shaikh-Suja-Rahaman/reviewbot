@@ -28,6 +28,51 @@ def extract_fingerprints(comment_bodies: list[str]) -> set[str]:
         found.update(FP_MARKER_RE.findall(body))
     return found
 
+
+# First line of every comment body: "{emoji} **[SEVERITY]** {title}".
+COMMENT_HEAD_RE = re.compile(r"\*\*\[([A-Z]+)\]\*\*\s*(.+)")
+
+
+def _title_tokens(title: str) -> set[str]:
+    return set(re.sub(r"[^a-z0-9]+", " ", title.lower()).split())
+
+
+def extract_anchors(comments: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    """(path, severity, title) for existing inline comments, for fuzzy dedup."""
+    anchors: list[tuple[str, str, str]] = []
+    for c in comments:
+        body = c.get("body") or ""
+        path = c.get("path")
+        m = COMMENT_HEAD_RE.search(body)
+        if m and path:
+            anchors.append((path, m.group(1).lower(), m.group(2).strip()))
+    return anchors
+
+
+def is_near_duplicate(
+    f: Finding, anchors: list[tuple[str, str, str]], sim_threshold: float = 0.5
+) -> bool:
+    """True if an existing comment on the same file+severity has a similar title.
+
+    The exact fingerprint misses a finding when the model rephrases its title on a
+    re-review. Title-token similarity catches those rewordings WITHOUT suppressing
+    a genuinely different finding (distinct titles share no tokens), and is robust
+    to line shifts (unlike a file+severity+line key, which drops nearby findings).
+    """
+    f_tokens = _title_tokens(f.title)
+    if not f_tokens:
+        return False
+    for path, severity, title in anchors:
+        if path != f.file or severity != f.severity:
+            continue
+        a_tokens = _title_tokens(title)
+        if not a_tokens:
+            continue
+        jaccard = len(f_tokens & a_tokens) / len(f_tokens | a_tokens)
+        if jaccard >= sim_threshold:
+            return True
+    return False
+
 RECOMMENDATION_LABEL = {
     "approve": "✅ Approve",
     "approve_with_nits": "✅ Approve (with nits)",
